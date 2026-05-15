@@ -220,6 +220,11 @@ function identificarProducto(descripcion, embarcador, consignatario, importadore
   return 'No asociado';
 }
 
+function clasificarTipo(descripcion, producto) {
+  if (producto === 'No asociado') return '';
+  return /\borg(anic)?\b/i.test(descripcion ?? '') ? 'Organico' : 'Convencional';
+}
+
 function segmentarJengibre(descripcion, producto) {
   if (producto === 'Jengibre fresco' && typeof descripcion === 'string') {
     const d = descripcion.toLowerCase();
@@ -247,7 +252,7 @@ export function clasificarAereo(descripcion, embarcador, consignatario) {
 
   return {
     'Producto':      producto,
-    'Tipo':          '',
+    'Tipo':          clasificarTipo(descripcion, producto),
     'Pais':          pais,
     'Ciudad destino': '',
     'Continente':    CONTINENTES[pais] ?? '',
@@ -268,7 +273,7 @@ export function clasificarMaritimo(descripcion, embarcador, consignatario, puert
 
   return {
     'Producto':       producto,
-    'Tipo':           '',
+    'Tipo':           clasificarTipo(descripcion, producto),
     'Pais':           pais,
     'Ciudad destino': ciudadDestino,
     'Continente':     CONTINENTES[pais] ?? 'No asociado',

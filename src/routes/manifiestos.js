@@ -71,12 +71,27 @@ const COL_NAMES_SQL = DB_COLS.map(c => `"${c}"`).join(', ');
 
 // ── Helpers DB ────────────────────────────────────────────────────────────────
 
-async function isScraped(tipo, logKey) {
+function getDaysInRange(fechaIsoStart, fechaIsoEnd) {
+  const days = [];
+  const end  = new Date(fechaIsoEnd);
+  for (const d = new Date(fechaIsoStart); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
+    days.push(d.toISOString().slice(0, 10));
+  }
+  return days;
+}
+
+function isoToFecha(isoDate) {
+  const [y, m, d] = isoDate.split('-');
+  return `${d}/${m}/${y}`;
+}
+
+async function getMissingDays(tipo, days) {
   const r = await pool.query(
-    'SELECT 1 FROM scrape_log WHERE tipo=$1 AND fecha=$2',
-    [tipo, logKey],
+    'SELECT fecha FROM scrape_log WHERE tipo=$1 AND fecha = ANY($2)',
+    [tipo, days],
   );
-  return r.rowCount > 0;
+  const scraped = new Set(r.rows.map(row => row.fecha));
+  return days.filter(d => !scraped.has(d));
 }
 
 async function clearRange(tipo, fechaIsoStart, fechaIsoEnd) {
@@ -239,43 +254,49 @@ router.get('/', async (req, res) => {
       return res.status(400).json({ error: 'fecha_inicio no puede ser mayor que fecha_fin' });
     }
 
-    const logKey = `${fecha_inicio}|${fecha_fin}`;
+    const logKey   = `${fecha_inicio}|${fecha_fin}`;
+    const allDays  = getDaysInRange(fechaIsoStart, fechaIsoEnd);
 
-    // ── Determinar qué tipos necesitan scraping ────────────────────────────
-    const toScrape = [];
+    // ── Determinar qué días faltan por tipo ────────────────────────────────
+    const toScrape = {};
     for (const tipo of tipos) {
-      if (forceRefresh || !(await isScraped(tipo, logKey))) {
-        toScrape.push(tipo);
-      }
+      const missing = forceRefresh
+        ? allDays
+        : await getMissingDays(tipo, allDays);
+      if (missing.length > 0) toScrape[tipo] = missing;
     }
 
-    const jobKey = `${tipos.join('-')}|${logKey}`;
+    const jobKey         = `${tipos.join('-')}|${logKey}`;
+    const hasPendingWork = Object.keys(toScrape).length > 0;
 
-    // ── Background Worker: dispara scraping sin bloquear Express ──────────
-    if (toScrape.length > 0) {
+    // ── Background Worker: dispara scraping día a día sin bloquear Express ─
+    if (hasPendingWork) {
       if (!activeJobs.has(jobKey)) {
         activeJobs.add(jobKey);
 
         (async () => {
           try {
-            for (const tipo of toScrape) {
-              console.log(`[worker] Iniciando ${tipo}: ${fecha_inicio} → ${fecha_fin}`);
-              await clearRange(tipo, fechaIsoStart, fechaIsoEnd);
+            for (const [tipo, days] of Object.entries(toScrape)) {
+              for (const day of days) {
+                const fechaDD = isoToFecha(day);
+                console.log(`[worker] Iniciando ${tipo}: ${fechaDD}`);
+                await clearRange(tipo, day, day);
 
-              let totalFilas = 0;
-              const onBatchScraped = async (filasMani) => {
-                await saveBatch(filasMani);
-                totalFilas += filasMani.length;
-              };
+                let totalFilas = 0;
+                const onBatchScraped = async (filasMani) => {
+                  await saveBatch(filasMani);
+                  totalFilas += filasMani.length;
+                };
 
-              if (tipo === 'aereo') {
-                await scrapeAereo(fecha_inicio, fecha_fin, onBatchScraped);
-              } else {
-                await scrapeMaritimo(fecha_inicio, fecha_fin, onBatchScraped);
+                if (tipo === 'aereo') {
+                  await scrapeAereo(fechaDD, fechaDD, onBatchScraped);
+                } else {
+                  await scrapeMaritimo(fechaDD, fechaDD, onBatchScraped);
+                }
+
+                await markAsScraped(tipo, day, totalFilas);
+                console.log(`[worker] ${tipo} ${fechaDD} terminado. Filas: ${totalFilas}`);
               }
-
-              await markAsScraped(tipo, logKey, totalFilas);
-              console.log(`[worker] ${tipo} terminado. Filas: ${totalFilas}`);
             }
           } catch (error) {
             console.error(`[worker] Error fatal en job:`, error);

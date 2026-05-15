@@ -5,7 +5,7 @@ import manifiestos from './src/routes/manifiestos.js';
 
 const app = express();
 app.use(cors({
-  origin: ['https://aduanas.vercel.app', 'http://localhost:3000'],
+  origin: ['https://front-aduanas.vercel.app', 'https://aduanas.stratego.pe', 'http://localhost:3000'],
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   credentials: true
 }));

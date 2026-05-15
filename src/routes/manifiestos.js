@@ -354,4 +354,202 @@ router.get('/', async (req, res) => {
   }
 });
 
+// ── Helpers dashboard ─────────────────────────────────────────────────────────
+// Params comunes: semana_inicio=YYYYWW, semana_fin=YYYYWW, productos=P1,P2,... (opcional)
+function parseDashboardParams(query) {
+  const { semana_inicio, semana_fin, productos: productosParam } = query;
+
+  const swStart = parseInt(semana_inicio);
+  const swEnd   = parseInt(semana_fin);
+  if (!swStart || !swEnd || swStart > swEnd) return null;
+
+  const productos = (productosParam ?? '')
+    .split(',').map(p => p.trim()).filter(Boolean);
+
+  return { swStart, swEnd, productos };
+}
+
+// Construye el WHERE y los args según si se filtra por productos o no
+function buildDashboardWhere(p) {
+  if (p.productos.length > 0) {
+    return {
+      where: `("Año" * 100 + "Semana") BETWEEN $1 AND $2 AND "Producto" = ANY($3)`,
+      args:  [p.swStart, p.swEnd, p.productos],
+    };
+  }
+  return {
+    where: `("Año" * 100 + "Semana") BETWEEN $1 AND $2`,
+    args:  [p.swStart, p.swEnd],
+  };
+}
+
+// ── GET /api/manifiestos/dashboard ───────────────────────────────────────────
+// Devuelve los 4 datasets + opciones de productos en una sola llamada.
+router.get('/dashboard', async (req, res) => {
+  try {
+    const p = parseDashboardParams(req.query);
+    if (!p) return res.status(400).json({ error: 'Parámetros requeridos: semana_inicio, semana_fin (YYYYWW)' });
+
+    const { where: WHERE, args } = buildDashboardWhere(p);
+
+    const [exportadores, envio, continentes, importadoresSemana, productosDisponibles] = await Promise.all([
+      pool.query(
+        `SELECT "Ciudad destino", "Consignatario", "Embarcador",
+           SUM(CASE WHEN UPPER("Tipo") = 'CONVENCIONAL' THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS convencional,
+           SUM(CASE WHEN UPPER("Tipo") = 'ORGANICO'     THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS organico,
+           SUM(REPLACE("Peso Bruto", ',', '')::numeric) AS total
+         FROM manifiestos WHERE ${WHERE} GROUP BY 1,2,3 ORDER BY total DESC`,
+        args,
+      ),
+      pool.query(
+        `SELECT "Envio" AS tipo_envio,
+           SUM(CASE WHEN UPPER("Tipo") = 'CONVENCIONAL' THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS convencional,
+           SUM(CASE WHEN UPPER("Tipo") = 'ORGANICO'     THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS organico,
+           SUM(REPLACE("Peso Bruto", ',', '')::numeric) AS total
+         FROM manifiestos WHERE ${WHERE} GROUP BY "Envio"`,
+        args,
+      ),
+      pool.query(
+        `SELECT "Continente",
+           SUM(CASE WHEN UPPER("Tipo") = 'CONVENCIONAL' THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS convencional,
+           SUM(CASE WHEN UPPER("Tipo") = 'ORGANICO'     THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS organico,
+           SUM(REPLACE("Peso Bruto", ',', '')::numeric) AS total
+         FROM manifiestos WHERE ${WHERE} GROUP BY "Continente" ORDER BY total DESC`,
+        args,
+      ),
+      pool.query(
+        `SELECT "Año", "Semana", "Continente",
+           COUNT(DISTINCT "Consignatario") AS recuento_importadores
+         FROM manifiestos WHERE ${WHERE}
+         GROUP BY "Año", "Semana", "Continente"
+         ORDER BY "Año" ASC, "Semana" ASC`,
+        args,
+      ),
+      pool.query(
+        `SELECT DISTINCT "Producto" AS val
+         FROM manifiestos
+         WHERE "Producto" IS NOT NULL AND "Producto" <> '' AND "Producto" <> 'No asociado'
+         ORDER BY val ASC`,
+      ),
+    ]);
+
+    res.json({
+      exportadores:         exportadores.rows,
+      envio:                envio.rows,
+      continentes:          continentes.rows,
+      importadores_semana:  importadoresSemana.rows,
+      productos_disponibles: productosDisponibles.rows.map(r => r.val),
+    });
+  } catch (err) {
+    console.error('[/dashboard]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/manifiestos/dashboard/exportadores ───────────────────────────────
+// ?semana_inicio=202601&semana_fin=202620&productos=Palta,Jengibre fresco
+router.get('/dashboard/exportadores', async (req, res) => {
+  try {
+    const p = parseDashboardParams(req.query);
+    if (!p) return res.status(400).json({ error: 'Parámetros requeridos: semana_inicio, semana_fin (YYYYWW)' });
+
+    const { where, args } = buildDashboardWhere(p);
+    const result = await pool.query(
+      `SELECT
+         "Ciudad destino",
+         "Consignatario",
+         "Embarcador",
+         SUM(CASE WHEN UPPER("Tipo") = 'CONVENCIONAL' THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS convencional,
+         SUM(CASE WHEN UPPER("Tipo") = 'ORGANICO'     THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS organico,
+         SUM(REPLACE("Peso Bruto", ',', '')::numeric) AS total
+       FROM manifiestos
+       WHERE ${where}
+       GROUP BY 1, 2, 3
+       ORDER BY total DESC`,
+      args,
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('[/dashboard/exportadores]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/manifiestos/dashboard/envio ─────────────────────────────────────
+router.get('/dashboard/envio', async (req, res) => {
+  try {
+    const p = parseDashboardParams(req.query);
+    if (!p) return res.status(400).json({ error: 'Parámetros requeridos: semana_inicio, semana_fin (YYYYWW)' });
+
+    const { where, args } = buildDashboardWhere(p);
+    const result = await pool.query(
+      `SELECT
+         "Envio" AS tipo_envio,
+         SUM(CASE WHEN UPPER("Tipo") = 'CONVENCIONAL' THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS convencional,
+         SUM(CASE WHEN UPPER("Tipo") = 'ORGANICO'     THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS organico,
+         SUM(REPLACE("Peso Bruto", ',', '')::numeric) AS total
+       FROM manifiestos
+       WHERE ${where}
+       GROUP BY "Envio"`,
+      args,
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('[/dashboard/envio]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/manifiestos/dashboard/continentes ───────────────────────────────
+router.get('/dashboard/continentes', async (req, res) => {
+  try {
+    const p = parseDashboardParams(req.query);
+    if (!p) return res.status(400).json({ error: 'Parámetros requeridos: semana_inicio, semana_fin (YYYYWW)' });
+
+    const { where, args } = buildDashboardWhere(p);
+    const result = await pool.query(
+      `SELECT
+         "Continente",
+         SUM(CASE WHEN UPPER("Tipo") = 'CONVENCIONAL' THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS convencional,
+         SUM(CASE WHEN UPPER("Tipo") = 'ORGANICO'     THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS organico,
+         SUM(REPLACE("Peso Bruto", ',', '')::numeric) AS total
+       FROM manifiestos
+       WHERE ${where}
+       GROUP BY "Continente"
+       ORDER BY total DESC`,
+      args,
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('[/dashboard/continentes]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/manifiestos/dashboard/importadores-semana ───────────────────────
+router.get('/dashboard/importadores-semana', async (req, res) => {
+  try {
+    const p = parseDashboardParams(req.query);
+    if (!p) return res.status(400).json({ error: 'Parámetros requeridos: semana_inicio, semana_fin (YYYYWW)' });
+
+    const { where, args } = buildDashboardWhere(p);
+    const result = await pool.query(
+      `SELECT
+         "Año",
+         "Semana",
+         "Continente",
+         COUNT(DISTINCT "Consignatario") AS recuento_importadores
+       FROM manifiestos
+       WHERE ${where}
+       GROUP BY "Año", "Semana", "Continente"
+       ORDER BY "Año" ASC, "Semana" ASC`,
+      args,
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('[/dashboard/importadores-semana]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;

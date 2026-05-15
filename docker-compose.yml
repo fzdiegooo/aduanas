@@ -1,0 +1,27 @@
+services:
+  api:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: aduanas_api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    
+    env_file:
+      - .env
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # EL BLINDAJE DE RENDIMIENTO (Evita el problema del Vecino Ruidoso)
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'      # Máximo 1 Core del servidor (ajusta según lo que tengas)
+          memory: 1G       # Si hay un memory leak, Docker lo reinicia en vez de colgar el VPS
+
+networks:
+  default:
+    name: aduanas_net
+    driver: bridge

@@ -6,6 +6,9 @@ import { parseFechaToISO } from '../scrapers/clasificacion.js';
 
 const router = Router();
 
+// ── Diccionario global para evitar scraping duplicado ─────────────────────────
+const activeJobs = new Set();
+
 // ── Whitelist de columnas filtrables (evita SQL injection) ────────────────────
 const ALLOWED_COLS = new Set([
   'Manifiesto', 'Fecha de Zarpe', 'Nombre de Nave', 'Detalle', 'Puerto', 'BL',
@@ -76,19 +79,19 @@ async function isScraped(tipo, logKey) {
   return r.rowCount > 0;
 }
 
-async function saveRows(rows, tipo, logKey, fechaIsoStart, fechaIsoEnd) {
+async function clearRange(tipo, fechaIsoStart, fechaIsoEnd) {
+  await pool.query(
+    'DELETE FROM manifiestos WHERE "Envio"=$1 AND _fecha_iso BETWEEN $2 AND $3',
+    [tipo, fechaIsoStart, fechaIsoEnd],
+  );
+}
+
+async function saveBatch(rows) {
+  if (!rows || rows.length === 0) return;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-
-    // Eliminar datos previos del rango
-    await client.query(
-      'DELETE FROM manifiestos WHERE "Envio"=$1 AND _fecha_iso BETWEEN $2 AND $3',
-      [tipo, fechaIsoStart, fechaIsoEnd],
-    );
-
-    // Insertar en lotes de 100 filas
-    const BATCH = 100;
+    const BATCH = 1000;
     for (let i = 0; i < rows.length; i += BATCH) {
       const batch = rows.slice(i, i + BATCH);
       const placeholders = batch.map((_, j) =>
@@ -100,16 +103,6 @@ async function saveRows(rows, tipo, logKey, fechaIsoStart, fechaIsoEnd) {
         values,
       );
     }
-
-    // Upsert en scrape_log
-    await client.query(
-      `INSERT INTO scrape_log (tipo, fecha, row_count)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (tipo, fecha)
-       DO UPDATE SET scraped_at = NOW(), row_count = EXCLUDED.row_count`,
-      [tipo, logKey, rows.length],
-    );
-
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -117,6 +110,14 @@ async function saveRows(rows, tipo, logKey, fechaIsoStart, fechaIsoEnd) {
   } finally {
     client.release();
   }
+}
+
+async function markAsScraped(tipo, logKey, rowCount) {
+  await pool.query(
+    `INSERT INTO scrape_log (tipo, fecha, row_count) VALUES ($1, $2, $3)
+     ON CONFLICT (tipo, fecha) DO UPDATE SET scraped_at = NOW(), row_count = EXCLUDED.row_count`,
+    [tipo, logKey, rowCount],
+  );
 }
 
 // ── GET /api/manifiestos/filtros ──────────────────────────────────────────────
@@ -248,17 +249,46 @@ router.get('/', async (req, res) => {
       }
     }
 
-    // ── Scraping (sin mantener conexión DB abierta) ────────────────────────
-    for (const tipo of toScrape) {
-      console.log(`[scraper] Iniciando ${tipo}: ${fecha_inicio} → ${fecha_fin}`);
-      let rows;
-      if (tipo === 'aereo') {
-        rows = await scrapeAereo(fecha_inicio, fecha_fin);
-      } else {
-        rows = await scrapeMaritimo(fecha_inicio, fecha_fin);
+    const jobKey = `${tipos.join('-')}|${logKey}`;
+
+    // ── Background Worker: dispara scraping sin bloquear Express ──────────
+    if (toScrape.length > 0) {
+      if (!activeJobs.has(jobKey)) {
+        activeJobs.add(jobKey);
+
+        (async () => {
+          try {
+            for (const tipo of toScrape) {
+              console.log(`[worker] Iniciando ${tipo}: ${fecha_inicio} → ${fecha_fin}`);
+              await clearRange(tipo, fechaIsoStart, fechaIsoEnd);
+
+              let totalFilas = 0;
+              const onBatchScraped = async (filasMani) => {
+                await saveBatch(filasMani);
+                totalFilas += filasMani.length;
+              };
+
+              if (tipo === 'aereo') {
+                await scrapeAereo(fecha_inicio, fecha_fin, onBatchScraped);
+              } else {
+                await scrapeMaritimo(fecha_inicio, fecha_fin, onBatchScraped);
+              }
+
+              await markAsScraped(tipo, logKey, totalFilas);
+              console.log(`[worker] ${tipo} terminado. Filas: ${totalFilas}`);
+            }
+          } catch (error) {
+            console.error(`[worker] Error fatal en job:`, error);
+          } finally {
+            activeJobs.delete(jobKey);
+          }
+        })();
       }
-      await saveRows(rows, tipo, logKey, fechaIsoStart, fechaIsoEnd);
-      console.log(`[scraper] ${tipo} guardado: ${rows.length} filas`);
+
+      return res.status(202).json({
+        status: 'procesando',
+        total: 0, page: pageNum, page_size: pageSize, pages: 1, data: [],
+      });
     }
 
     // ── Construir WHERE dinámico con filtros de columna ────────────────────

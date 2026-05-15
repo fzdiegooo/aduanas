@@ -88,7 +88,7 @@ async function fetchNivel3(cookies, mani, guia, annoFull) {
  * Scrapea manifiestos aéreos SUNAT para el rango de fechas dado.
  * @returns {Promise<object[]>} Array de filas listas para insertar en DB.
  */
-export async function scrapeAereo(fechaInicio, fechaFin) {
+export async function scrapeAereo(fechaInicio, fechaFin, onBatchScraped) {
   const cookies = await initSession();
 
   // ── Nivel 1: lista de manifiestos (paginada) ──────────────────────────────
@@ -153,7 +153,7 @@ export async function scrapeAereo(fechaInicio, fechaFin) {
   console.log(`  [aereo] Manifiestos encontrados: ${manifiestos.length}`);
 
   const limit   = pLimit(MAX_WORKERS);
-  const allRows = [];
+  let totalDescargado = 0;
 
   for (let idx = 0; idx < manifiestos.length; idx++) {
     const mani     = manifiestos[idx];
@@ -224,10 +224,14 @@ export async function scrapeAereo(fechaInicio, fechaFin) {
     const tasks     = guias.map(guia => limit(() => fetchNivel3(cookies, mani, guia, annoFull)));
     const results   = await Promise.all(tasks);
     const filasMani = results.flat();
-    allRows.push(...filasMani);
+
+    if (filasMani.length > 0) {
+      await onBatchScraped(filasMani);
+      totalDescargado += filasMani.length;
+    }
 
     console.log(`  [aereo] [${idx + 1}/${manifiestos.length}] ${mani.texto}: ${guias.length} guías → ${filasMani.length} filas`);
   }
 
-  return allRows;
+  return totalDescargado;
 }

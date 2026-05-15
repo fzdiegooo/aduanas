@@ -79,7 +79,7 @@ async function fetchNivel3(cookies, dataPayload, regDet,
  * Scrapea manifiestos marítimos SUNAT para el rango de fechas dado.
  * @returns {Promise<object[]>} Array de filas listas para insertar en DB.
  */
-export async function scrapeMaritimo(fechaInicio, fechaFin) {
+export async function scrapeMaritimo(fechaInicio, fechaFin, onBatchScraped) {
   const cookies = await initSession();
 
   const dataPayload = {
@@ -89,7 +89,7 @@ export async function scrapeMaritimo(fechaInicio, fechaFin) {
   };
 
   const limit   = pLimit(MAX_WORKERS);
-  const allRows = [];
+  let totalDescargado = 0;
 
   // ── Nivel 1: lista de manifiestos (paginada) ──────────────────────────────
   let respManifHtml = await postHtml(`${BASE_URL}?accion=consultarManifiesto`, dataPayload, cookies);
@@ -123,6 +123,8 @@ export async function scrapeMaritimo(fechaInicio, fechaFin) {
         dataPayload,
         cookies,
       );
+      const filasMani = [];
+
       let paginaN2 = 1;
 
       while (true) {
@@ -157,7 +159,7 @@ export async function scrapeMaritimo(fechaInicio, fechaFin) {
               j.valDetalle, j.valPuerto, j.valBl, j.valFechaTransmision),
           ));
           const results = await Promise.all(tasks);
-          allRows.push(...results.flat());
+          filasMani.push(...results.flat());
         }
 
         // Paginación nivel 2
@@ -174,7 +176,12 @@ export async function scrapeMaritimo(fechaInicio, fechaFin) {
         paginaN2++;
       }
 
-      console.log(`  [maritimo] [${iM + 1}/${filas.length}] ${valManifiesto} (acumulado: ${allRows.length} filas)`);
+      if (filasMani.length > 0) {
+        await onBatchScraped(filasMani);
+        totalDescargado += filasMani.length;
+      }
+
+      console.log(`  [maritimo] [${iM + 1}/${filas.length}] ${valManifiesto} (acumulado: ${totalDescargado} filas)`);
     }
 
     // Paginación nivel 1
@@ -191,5 +198,5 @@ export async function scrapeMaritimo(fechaInicio, fechaFin) {
     paginaN1++;
   }
 
-  return allRows;
+  return totalDescargado;
 }

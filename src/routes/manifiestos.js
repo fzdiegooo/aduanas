@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { pool }   from '../db.js';
+import ExcelJS    from 'exceljs';
 import { scrapeAereo }    from '../scrapers/aereo.js';
 import { scrapeMaritimo } from '../scrapers/maritimo.js';
 import { parseFechaToISO } from '../scrapers/clasificacion.js';
@@ -337,7 +338,7 @@ router.get('/', async (req, res) => {
         `SELECT ${SELECT_COLS}
          FROM manifiestos
          WHERE ${whereClause}
-         ORDER BY "Manifiesto", "BL"
+         ORDER BY _fecha_iso DESC, "Manifiesto", "BL"
          LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
         [...allBaseParams, pageSize, offset],
       ),
@@ -552,6 +553,119 @@ router.get('/dashboard/importadores-semana', async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     console.error('[/dashboard/importadores-semana]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/manifiestos/export ──────────────────────────────────────────────
+// Descarga todos los registros del rango como archivo .xlsx.
+// Mismos parámetros que GET /: fecha_inicio, fecha_fin, tipos, filters
+router.get('/export', async (req, res) => {
+  try {
+    const {
+      fecha_inicio,
+      fecha_fin,
+      tipos: tiposParam,
+      filters = '',
+    } = req.query;
+
+    if (!fecha_inicio || !fecha_fin) {
+      return res.status(400).json({ error: 'fecha_inicio y fecha_fin son requeridos (dd/mm/yyyy)' });
+    }
+
+    const tipos = (tiposParam ?? '')
+      .split(',').map(t => t.trim().toLowerCase())
+      .filter(t => ['aereo', 'maritimo'].includes(t));
+
+    if (!tipos.length) {
+      return res.status(400).json({ error: 'El parámetro tipos debe ser "aereo", "maritimo" o ambos.' });
+    }
+
+    const fechaIsoStart = parseFechaToISO(fecha_inicio);
+    const fechaIsoEnd   = parseFechaToISO(fecha_fin);
+
+    if (!fechaIsoStart || !fechaIsoEnd) {
+      return res.status(400).json({ error: 'Formato de fecha inválido. Use dd/mm/yyyy' });
+    }
+    if (fechaIsoStart > fechaIsoEnd) {
+      return res.status(400).json({ error: 'fecha_inicio no puede ser mayor que fecha_fin' });
+    }
+
+    const baseParams = [tipos, fechaIsoStart, fechaIsoEnd];
+    const { sql: filterSQL, params: filterParams } = buildFilterClauses(filters, baseParams.length + 1);
+    const allParams   = [...baseParams, ...filterParams];
+    const whereClause = `"Envio" = ANY($1) AND _fecha_iso BETWEEN $2 AND $3${filterSQL}`;
+
+    const result = await pool.query(
+      `SELECT ${SELECT_COLS} FROM manifiestos WHERE ${whereClause} ORDER BY _fecha_iso DESC, "Manifiesto", "BL"`,
+      allParams,
+    );
+
+    // Orden y cabeceras del front-end
+    const EXPORT_COLS = [
+      { key: 'Manifiesto',                header: 'Manifiesto',      width: 18 },
+      { key: 'Envio',                     header: 'Envío',           width: 12 },
+      { key: 'Semana',                    header: 'Semana',          width: 10 },
+      { key: 'Año',                       header: 'Año',             width: 8  },
+      { key: 'Fecha de Zarpe',            header: 'Fecha Zarpe',     width: 16 },
+      { key: 'Nombre de Nave',            header: 'Nave',            width: 22 },
+      { key: 'Detalle',                   header: 'Detalle',         width: 14 },
+      { key: 'Puerto',                    header: 'Puerto',          width: 20 },
+      { key: 'BL',                        header: 'B/L',             width: 22 },
+      { key: 'Fecha de Transmisión',      header: 'Fecha Transm.',   width: 18 },
+      { key: 'Bultos',                    header: 'Bultos',          width: 10 },
+      { key: 'Peso Bruto',                header: 'Peso Bruto',      width: 14 },
+      { key: 'Empaques',                  header: 'Empaques',        width: 14 },
+      { key: 'Embarcador',               header: 'Embarcador',      width: 30 },
+      { key: 'Consignatario',             header: 'Consignatario',   width: 30 },
+      { key: 'Marcas y Números',          header: 'Marcas/Nros.',    width: 20 },
+      { key: 'Descripción de Mercadería', header: 'Descripción',     width: 35 },
+      { key: 'Producto',                  header: 'Producto',        width: 18 },
+      { key: 'Tipo',                      header: 'Tipo',            width: 14 },
+      { key: 'Pais',                      header: 'País',            width: 18 },
+      { key: 'Ciudad destino',            header: 'Ciudad',          width: 18 },
+      { key: 'Continente',                header: 'Continente',      width: 16 },
+    ];
+
+    const workbook = new ExcelJS.Workbook();
+    const sheet    = workbook.addWorksheet('Manifiestos');
+
+    sheet.columns = EXPORT_COLS.map(c => ({ header: c.header, key: c.key, width: c.width }));
+
+    // Estilo de cabecera
+    const headerRow = sheet.getRow(1);
+    headerRow.height = 20;
+    headerRow.eachCell(cell => {
+      cell.font      = { bold: true, color: { argb: 'FFFFFFFF' } };
+      cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E79' } };
+      cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: false };
+    });
+
+    // Autofilter en toda la cabecera
+    sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: EXPORT_COLS.length } };
+
+    for (const row of result.rows) {
+      const values = EXPORT_COLS.map(c => {
+        if (c.key === 'Envio') {
+          const v = row[c.key];
+          return v === 'maritimo' ? 'Marítimo' : v === 'aereo' ? 'Aéreo' : (v ?? '');
+        }
+        return row[c.key] ?? '';
+      });
+      const dataRow = sheet.addRow(values);
+      dataRow.eachCell(cell => {
+        cell.alignment = { wrapText: false, vertical: 'middle' };
+      });
+    }
+
+    const filename = `manifiestos_${fecha_inicio.replace(/\//g, '-')}_${fecha_fin.replace(/\//g, '-')}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error('[/export]', err.message);
     res.status(500).json({ error: err.message });
   }
 });

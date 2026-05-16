@@ -7,7 +7,8 @@ import { parseFechaToISO } from '../scrapers/clasificacion.js';
 const router = Router();
 
 // ── Diccionario global para evitar scraping duplicado ─────────────────────────
-const activeJobs = new Set();
+const activeJobs    = new Set();
+const refreshedJobs = new Set(); // evita re-trigger de force_refresh tras completar
 
 // ── Whitelist de columnas filtrables (evita SQL injection) ────────────────────
 const ALLOWED_COLS = new Set([
@@ -256,23 +257,26 @@ router.get('/', async (req, res) => {
 
     const logKey   = `${fecha_inicio}|${fecha_fin}`;
     const allDays  = getDaysInRange(fechaIsoStart, fechaIsoEnd);
+    const jobKey   = `${tipos.join('-')}|${logKey}`;
 
     // ── Determinar qué días faltan por tipo ────────────────────────────────
+    // shouldForce: sólo aplica force_refresh si el job NO está corriendo NI ya fue disparado
+    const shouldForce = forceRefresh && !activeJobs.has(jobKey) && !refreshedJobs.has(jobKey);
     const toScrape = {};
     for (const tipo of tipos) {
-      const missing = forceRefresh
+      const missing = shouldForce
         ? allDays
         : await getMissingDays(tipo, allDays);
       if (missing.length > 0) toScrape[tipo] = missing;
     }
 
-    const jobKey         = `${tipos.join('-')}|${logKey}`;
     const hasPendingWork = Object.keys(toScrape).length > 0;
 
     // ── Background Worker: dispara scraping día a día sin bloquear Express ─
-    if (hasPendingWork) {
+    if (hasPendingWork || activeJobs.has(jobKey)) {
       if (!activeJobs.has(jobKey)) {
         activeJobs.add(jobKey);
+        if (forceRefresh) refreshedJobs.add(jobKey);
 
         (async () => {
           try {

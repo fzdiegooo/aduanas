@@ -399,25 +399,25 @@ router.get('/dashboard', async (req, res) => {
     const [exportadores, envio, continentes, importadoresSemana, productosDisponibles] = await Promise.all([
       pool.query(
         `SELECT "Ciudad destino", "Consignatario", "Embarcador",
-           SUM(CASE WHEN UPPER("Tipo") = 'CONVENCIONAL' THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS convencional,
-           SUM(CASE WHEN UPPER("Tipo") = 'ORGANICO'     THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS organico,
-           SUM(REPLACE("Peso Bruto", ',', '')::numeric) AS total
+           SUM(CASE WHEN UPPER("Tipo") = 'CONVENCIONAL' THEN 1 ELSE 0 END) AS convencional,
+           SUM(CASE WHEN UPPER("Tipo") = 'ORGANICO'     THEN 1 ELSE 0 END) AS organico,
+           COUNT(*) AS total
          FROM manifiestos WHERE ${WHERE} GROUP BY 1,2,3 ORDER BY total DESC`,
         args,
       ),
       pool.query(
         `SELECT "Envio" AS tipo_envio,
-           SUM(CASE WHEN UPPER("Tipo") = 'CONVENCIONAL' THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS convencional,
-           SUM(CASE WHEN UPPER("Tipo") = 'ORGANICO'     THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS organico,
-           SUM(REPLACE("Peso Bruto", ',', '')::numeric) AS total
+           SUM(CASE WHEN UPPER("Tipo") = 'CONVENCIONAL' THEN 1 ELSE 0 END) AS convencional,
+           SUM(CASE WHEN UPPER("Tipo") = 'ORGANICO'     THEN 1 ELSE 0 END) AS organico,
+           COUNT(*) AS total
          FROM manifiestos WHERE ${WHERE} GROUP BY "Envio"`,
         args,
       ),
       pool.query(
         `SELECT "Continente",
-           SUM(CASE WHEN UPPER("Tipo") = 'CONVENCIONAL' THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS convencional,
-           SUM(CASE WHEN UPPER("Tipo") = 'ORGANICO'     THEN REPLACE("Peso Bruto", ',', '')::numeric ELSE 0 END) AS organico,
-           SUM(REPLACE("Peso Bruto", ',', '')::numeric) AS total
+           SUM(CASE WHEN UPPER("Tipo") = 'CONVENCIONAL' THEN 1 ELSE 0 END) AS convencional,
+           SUM(CASE WHEN UPPER("Tipo") = 'ORGANICO'     THEN 1 ELSE 0 END) AS organico,
+           COUNT(*) AS total
          FROM manifiestos WHERE ${WHERE} GROUP BY "Continente" ORDER BY total DESC`,
         args,
       ),

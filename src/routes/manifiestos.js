@@ -596,11 +596,6 @@ router.get('/export', async (req, res) => {
     const allParams   = [...baseParams, ...filterParams];
     const whereClause = `"Envio" = ANY($1) AND _fecha_iso BETWEEN $2 AND $3${filterSQL}`;
 
-    const result = await pool.query(
-      `SELECT ${SELECT_COLS} FROM manifiestos WHERE ${whereClause} ORDER BY _fecha_iso DESC, "Manifiesto", "BL"`,
-      allParams,
-    );
-
     // Orden y cabeceras del front-end
     const EXPORT_COLS = [
       { key: 'Manifiesto',                header: 'Manifiesto',      width: 18 },
@@ -627,8 +622,15 @@ router.get('/export', async (req, res) => {
       { key: 'Continente',                header: 'Continente',      width: 16 },
     ];
 
-    const workbook = new ExcelJS.Workbook();
-    const sheet    = workbook.addWorksheet('Manifiestos');
+    const filename = `manifiestos_${fecha_inicio.replace(/\//g, '-')}_${fecha_fin.replace(/\//g, '-')}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+      stream: res,
+      useStyles: true
+    });
+    const sheet = workbook.addWorksheet('Manifiestos');
 
     sheet.columns = EXPORT_COLS.map(c => ({ header: c.header, key: c.key, width: c.width }));
 
@@ -640,33 +642,67 @@ router.get('/export', async (req, res) => {
       cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E79' } };
       cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: false };
     });
+    headerRow.commit();
 
     // Autofilter en toda la cabecera
     sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: EXPORT_COLS.length } };
 
-    for (const row of result.rows) {
-      const values = EXPORT_COLS.map(c => {
-        if (c.key === 'Envio') {
-          const v = row[c.key];
-          return v === 'maritimo' ? 'Marítimo' : v === 'aereo' ? 'Aéreo' : (v ?? '');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const cursorName = 'export_cursor';
+      await client.query(
+        `DECLARE ${cursorName} CURSOR FOR SELECT ${SELECT_COLS} FROM manifiestos WHERE ${whereClause} ORDER BY _fecha_iso DESC, "Manifiesto", "BL"`,
+        allParams
+      );
+
+      const batchSize = 2000;
+      while (true) {
+        if (res.writableEnded || res.destroyed) {
+          break;
         }
-        return row[c.key] ?? '';
-      });
-      const dataRow = sheet.addRow(values);
-      dataRow.eachCell(cell => {
-        cell.alignment = { wrapText: false, vertical: 'middle' };
-      });
+
+        const fetchRes = await client.query(`FETCH ${batchSize} FROM ${cursorName}`);
+        if (fetchRes.rows.length === 0) {
+          break;
+        }
+
+        for (const row of fetchRes.rows) {
+          const values = EXPORT_COLS.map(c => {
+            if (c.key === 'Envio') {
+              const v = row[c.key];
+              return v === 'maritimo' ? 'Marítimo' : v === 'aereo' ? 'Aéreo' : (v ?? '');
+            }
+            return row[c.key] ?? '';
+          });
+          const dataRow = sheet.addRow(values);
+          dataRow.eachCell(cell => {
+            cell.alignment = { wrapText: false, vertical: 'middle' };
+          });
+          dataRow.commit();
+        }
+      }
+
+      await client.query(`CLOSE ${cursorName}`);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
     }
 
-    const filename = `manifiestos_${fecha_inicio.replace(/\//g, '-')}_${fecha_fin.replace(/\//g, '-')}.xlsx`;
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-
-    await workbook.xlsx.write(res);
-    res.end();
+    if (!res.writableEnded && !res.destroyed) {
+      sheet.commit();
+      await workbook.commit();
+    }
   } catch (err) {
     console.error('[/export]', err.message);
-    res.status(500).json({ error: err.message });
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message });
+    } else {
+      res.end();
+    }
   }
 });
 

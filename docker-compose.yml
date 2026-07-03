@@ -19,7 +19,7 @@ services:
       resources:
         limits:
           cpus: '1.0'      # Máximo 1 Core del servidor (ajusta según lo que tengas)
-          memory: 1G       # Si hay un memory leak, Docker lo reinicia en vez de colgar el VPS
+          memory: 2G       # 2G para soportar exports de 100k+ filas sin OOM kill
 
 networks:
   default:

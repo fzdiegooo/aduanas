@@ -561,6 +561,8 @@ router.get('/dashboard/importadores-semana', async (req, res) => {
 // Descarga todos los registros del rango como archivo .xlsx.
 // Mismos parámetros que GET /: fecha_inicio, fecha_fin, tipos, filters
 router.get('/export', async (req, res) => {
+  // Extiende el timeout del socket a 10 minutos para exports grandes (100k+ filas)
+  req.socket.setTimeout(10 * 60 * 1000);
   try {
     const {
       fecha_inicio,
@@ -675,11 +677,7 @@ router.get('/export', async (req, res) => {
             }
             return row[c.key] ?? '';
           });
-          const dataRow = sheet.addRow(values);
-          dataRow.eachCell(cell => {
-            cell.alignment = { wrapText: false, vertical: 'middle' };
-          });
-          dataRow.commit();
+          sheet.addRow(values).commit();
         }
       }
 

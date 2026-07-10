@@ -13,7 +13,7 @@ app.use(cors({
 app.use(express.json());
 
 app.use('/api/manifiestos', manifiestos);
-app.use('/api/senasa', senasa);
+app.use('/api/manifiestos/senasa', senasa);
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
